@@ -254,6 +254,32 @@ func (h *Handler) DeleteBranches(ctx context.Context, req *Request) error {
 				continue
 			}
 
+			// Check if upstack branch is checked out in another worktree.
+			// If so, we can't rebase it because git will refuse to check it out.
+			var inOtherWorktree bool
+			for localBranch, err := range repo.LocalBranches(ctx, &git.LocalBranchesOptions{Patterns: []string{above}}) {
+				if err == nil && localBranch.Worktree != "" {
+					// Branch is checked out in a worktree.
+					// We need to check if it's the current worktree or a different one.
+					// If we're not in detached HEAD and the branch matches current branch,
+					// it's the current worktree. Otherwise it's another worktree.
+					if currentBranch != "" && currentBranch == above {
+						// It's the current worktree, we can proceed
+						continue
+					}
+					inOtherWorktree = true
+					log.Warnf("%v: checked out in another worktree (%v), skipping automatic rebase", above, localBranch.Worktree)
+					log.Warnf("Please rebase %v manually in its worktree onto %v", above, base)
+					break
+				}
+			}
+
+			if inOtherWorktree {
+				// Skip the rebase for this upstack branch.
+				// User will need to manually rebase it in its worktree.
+				continue
+			}
+
 			log.Debug("Changing upstack branch to a new base",
 				"branch", above, "base", base)
 			if err := h.Service.BranchOnto(ctx, &spice.BranchOntoRequest{
