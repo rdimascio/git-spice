@@ -89,6 +89,18 @@ func (h *Handler) DeleteBranches(ctx context.Context, req *Request) error {
 	repo := h.Repository
 	log := h.Log
 
+	// Build a map of all branch worktree locations up front.
+	// This will be used to check both the checkout target and upstack branches.
+	branchWorktrees := make(map[string]string) // branch name -> worktree path
+	for branch, err := range repo.LocalBranches(ctx, nil) {
+		if err != nil {
+			return fmt.Errorf("list branches: %w", err)
+		}
+		if branch.Worktree != "" {
+			branchWorktrees[branch.Name] = branch.Worktree
+		}
+	}
+
 	// name to branch info
 	branchesToDelete := make(map[string]*branchInfo, len(req.Branches))
 	for _, branch := range req.Branches {
@@ -186,14 +198,12 @@ func (h *Handler) DeleteBranches(ctx context.Context, req *Request) error {
 				checkoutTarget = h.Store.Trunk()
 			}
 
-			for branch, err := range repo.LocalBranches(ctx, &git.LocalBranchesOptions{Patterns: []string{checkoutTarget}}) {
-				if err == nil && branch.Worktree != "" {
-					// Guaranteed not to be current worktree
-					// because we've already filtered for that.
-					checkoutDetached = true
-					log.Warnf("%v: checked out in another worktree (%v), will detach HEAD", checkoutTarget, branch.Worktree)
-					log.Warnf("Use 'gs branch checkout' to pick a branch and exit detached state")
-				}
+			if worktreePath, ok := branchWorktrees[checkoutTarget]; ok {
+				// Guaranteed not to be current worktree
+				// because we've already filtered for that.
+				checkoutDetached = true
+				log.Warnf("%v: checked out in another worktree (%v), will detach HEAD", checkoutTarget, worktreePath)
+				log.Warnf("Use 'gs branch checkout' to pick a branch and exit detached state")
 			}
 
 			// This is the only case where user's current HEAD is
@@ -252,6 +262,21 @@ func (h *Handler) DeleteBranches(ctx context.Context, req *Request) error {
 			if _, ok := branchesToDelete[above]; ok {
 				// This upstack is also being deleted. Skip.
 				continue
+			}
+
+			// Check if upstack branch is checked out in another worktree.
+			// If so, we can't rebase it because git will refuse to check it out.
+			if worktreePath, inWorktree := branchWorktrees[above]; inWorktree {
+				// Branch is checked out in a worktree.
+				// We need to check if it's the current worktree or a different one.
+				// If we're not in detached HEAD and the branch matches current branch,
+				// it's the current worktree. Otherwise it's another worktree.
+				if currentBranch == "" || currentBranch != above {
+					// It's in another worktree, skip rebasing
+					log.Warnf("%v: checked out in another worktree (%v), skipping automatic rebase", above, worktreePath)
+					log.Warnf("Please rebase %v manually in its worktree onto %v", above, base)
+					continue
+				}
 			}
 
 			log.Debug("Changing upstack branch to a new base",
